@@ -35,6 +35,7 @@ const TitleDialog = @import("title_dialog.zig").TitleDialog;
 const Window = @import("window.zig").Window;
 const InspectorWindow = @import("inspector_window.zig").InspectorWindow;
 const SplitTree = @import("split_tree.zig").SplitTree;
+const Tab = @import("tab.zig").Tab;
 const RenderSurface = @import("render_surface.zig").RenderSurface;
 const i18n = @import("../../../os/i18n.zig");
 const global = @import("../../../global.zig");
@@ -3745,13 +3746,14 @@ pub const Surface = extern struct {
         // The new tab comes with a fresh surface; dock next to it, then
         // close the placeholder. moveSplit handles removing us from the
         // old tree (cross-tree move) and rebinding our properties.
+        //
+        // Go through the tab's split tree directly rather than walking
+        // ancestors: the new window isn't realized yet, so the placeholder
+        // surface isn't attached to a widget hierarchy.
         win.newTabForWindow(self.core(), .none);
-        const placeholder = win.getActiveSurface() orelse return error.NoActiveSurface;
-        const tree_widget = ext.getAncestor(
-            SplitTree,
-            placeholder.as(gtk.Widget),
-        ) orelse return error.NoSplitTree;
-        try tree_widget.moveSplit(self, placeholder, .right);
+        const tab = win.getSelectedTab() orelse return error.NoTab;
+        const placeholder = tab.getActiveSurface() orelse return error.NoActiveSurface;
+        try tab.getSplitTree().moveSplit(self, placeholder, .right);
         placeholder.close();
 
         win.as(gtk.Window).present();

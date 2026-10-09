@@ -1021,7 +1021,7 @@ pub const Window = extern struct {
     }
 
     /// Get the currently selected tab as a Tab object.
-    fn getSelectedTab(self: *Self) ?*Tab {
+    pub fn getSelectedTab(self: *Self) ?*Tab {
         const priv = self.private();
         const page = priv.tab_view.getSelectedPage() orelse return null;
         const child = page.getChild();
