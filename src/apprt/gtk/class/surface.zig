@@ -3694,6 +3694,59 @@ pub const Surface = extern struct {
         }
     }
 
+    fn surfaceDragCancel(
+        _: *gtk.DragSource,
+        _: *gdk.Drag,
+        reason: gdk.DragCancelReason,
+        self: *Self,
+    ) callconv(.c) c_int {
+        // A pane drag that ends without any target accepting the drop is
+        // treated as a tear-off request: give the surface a window of its
+        // own. Explicit cancellations (Esc) and errors keep the default
+        // snap-back animation.
+        if (reason != .no_target) return @intFromBool(false);
+
+        self.tearOffToNewWindow() catch |err| {
+            log.warn("surface tear-off failed err={}", .{err});
+            return @intFromBool(false);
+        };
+
+        // Handled: suppress the cancel animation, we did something with it.
+        return @intFromBool(true);
+    }
+
+    /// Move this surface into a new window of its own. The surface keeps
+    /// its process and scrollback; the tab it leaves behind closes itself
+    /// if this was its last surface.
+    fn tearOffToNewWindow(self: *Self) !void {
+        const app = Application.default();
+
+        // Build the new window the same way Application.initAndShowWindow
+        // does.
+        const win = Window.new(app, .{});
+        _ = gobject.Object.bindProperty(
+            app.as(gobject.Object),
+            "config",
+            win.as(gobject.Object),
+            "config",
+            .{},
+        );
+
+        // The new tab comes with a fresh surface; dock next to it, then
+        // close the placeholder. moveSplit handles removing us from the
+        // old tree (cross-tree move) and rebinding our properties.
+        win.newTabForWindow(self.core(), .none);
+        const placeholder = win.getActiveSurface() orelse return error.NoActiveSurface;
+        const tree_widget = ext.getAncestor(
+            SplitTree,
+            placeholder.as(gtk.Widget),
+        ) orelse return error.NoSplitTree;
+        try tree_widget.moveSplit(self, placeholder, .right);
+        placeholder.close();
+
+        win.as(gtk.Window).present();
+    }
+
     fn surfaceDrop(
         _: *gtk.DropTarget,
         v: *const gobject.Value,
@@ -3876,6 +3929,7 @@ pub const Surface = extern struct {
             class.bindTemplateCallback("should_drag_handle_be_shown", &closureShouldDragHandleBeShown);
             class.bindTemplateCallback("surface_drag_prepare", &surfaceDragPrepare);
             class.bindTemplateCallback("surface_drag_begin", &surfaceDragBegin);
+            class.bindTemplateCallback("surface_drag_cancel", &surfaceDragCancel);
             class.bindTemplateCallback("surface_drop", &surfaceDrop);
             class.bindTemplateCallback("surface_drop_leave", &surfaceDropLeave);
             class.bindTemplateCallback("surface_drop_motion", &surfaceDropMotion);
