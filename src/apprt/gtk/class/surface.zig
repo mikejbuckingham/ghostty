@@ -3789,9 +3789,9 @@ pub const Surface = extern struct {
         x: f64,
         y: f64,
         self: *Self,
-    ) callconv(.c) void {
+    ) callconv(.c) c_int {
         const dropped_id = v.getUint64();
-        const dropped = self.core().?.app.findSurfaceByID(dropped_id) orelse return;
+        const dropped = self.core().?.app.findSurfaceByID(dropped_id) orelse return 0;
         const from = dropped.rt_surface.gobj();
 
         const st = ext.getAncestor(
@@ -3799,17 +3799,22 @@ pub const Surface = extern struct {
             self.as(gtk.Widget),
         ) orelse {
             log.warn("surface is not placed in a split tree", .{});
-            return;
+            return 0;
         };
 
         const dir = self.calcDropDirection(x, y);
 
         // The only error that could happen here is an OOM,
         // and in that case we're already milliseconds away from crashing, so...
-        st.moveSplit(from, self, dir) catch return;
+        st.moveSplit(from, self, dir) catch return 0;
 
         // Clean up overlay state
         self.setDropOverlayDirection(null);
+
+        // Accept the drop. Returning false here makes GTK report the drag
+        // as rejected, which on Wayland cancels the drag after the move
+        // already happened.
+        return 1;
     }
 
     fn surfaceDropLeave(
