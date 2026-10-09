@@ -3702,9 +3702,19 @@ pub const Surface = extern struct {
     ) callconv(.c) c_int {
         // A pane drag that ends without any target accepting the drop is
         // treated as a tear-off request: give the surface a window of its
-        // own. Explicit cancellations (Esc) and errors keep the default
-        // snap-back animation.
-        if (reason != .no_target) return @intFromBool(false);
+        // A pane drag that ends without any target accepting the drop is
+        // treated as a tear-off request: give the surface a window of its
+        // own. Explicit cancellations (Esc) keep the default snap-back
+        // animation.
+        //
+        // On Wayland, a drop with no accepting target is reported as
+        // `.error` rather than `.no_target` (wl_data_source.cancelled
+        // carries no reason), so both are treated as tear-off requests.
+        if (reason != .no_target and reason != .@"error") {
+            log.warn("TEAROFF-DEBUG drag-cancel reason={}", .{reason});
+            return @intFromBool(false);
+        }
+        log.warn("TEAROFF-DEBUG drag-cancel tearing off, reason={}", .{reason});
 
         self.tearOffToNewWindow() catch |err| {
             log.warn("surface tear-off failed err={}", .{err});
@@ -3745,6 +3755,15 @@ pub const Surface = extern struct {
         placeholder.close();
 
         win.as(gtk.Window).present();
+    }
+
+    fn surfaceDragEnd(
+        _: *gtk.DragSource,
+        _: *gdk.Drag,
+        _: c_int,
+        self: *Self,
+    ) callconv(.c) void {
+        log.warn("TEAROFF-DEBUG drag-end (drop accepted somewhere) surface={x}", .{self.core().?.id});
     }
 
     fn surfaceDrop(
@@ -3930,6 +3949,7 @@ pub const Surface = extern struct {
             class.bindTemplateCallback("surface_drag_prepare", &surfaceDragPrepare);
             class.bindTemplateCallback("surface_drag_begin", &surfaceDragBegin);
             class.bindTemplateCallback("surface_drag_cancel", &surfaceDragCancel);
+            class.bindTemplateCallback("surface_drag_end", &surfaceDragEnd);
             class.bindTemplateCallback("surface_drop", &surfaceDrop);
             class.bindTemplateCallback("surface_drop_leave", &surfaceDropLeave);
             class.bindTemplateCallback("surface_drop_motion", &surfaceDropMotion);
