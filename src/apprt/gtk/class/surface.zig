@@ -3752,8 +3752,23 @@ pub const Surface = extern struct {
         // surface isn't attached to a widget hierarchy.
         win.newTabForWindow(self.core(), .none);
         const tab = win.getSelectedTab() orelse return error.NoTab;
+        const split_tree = tab.getSplitTree();
         const placeholder = tab.getActiveSurface() orelse return error.NoActiveSurface;
-        try tab.getSplitTree().moveSplit(self, placeholder, .right);
+        try split_tree.moveSplit(self, placeholder, .right);
+
+        // Drop the placeholder from the tree directly — the close request
+        // path doesn't complete for a surface in a window that hasn't been
+        // realized yet. This mirrors closeConfirmationClose.
+        if (split_tree.getTree()) |tree| {
+            if (tree.locate(placeholder)) |handle| {
+                var new_tree = try tree.remove(
+                    Application.default().allocator(),
+                    handle,
+                );
+                defer new_tree.deinit();
+                split_tree.setTree(&new_tree);
+            }
+        }
         placeholder.close();
 
         win.as(gtk.Window).present();
