@@ -1505,6 +1505,9 @@ pub const Application = extern struct {
             .init("new-window", actionNewWindow, null),
             .init("new-window-command", actionNewWindow, as_variant_type),
             .init("new-tab", actionNewTab, tas_variant_type),
+            .init("new-split-right", actionNewSplitRight, tas_variant_type),
+            .init("new-split-down", actionNewSplitDown, tas_variant_type),
+            .init("goto-split", actionGotoSplit, s_variant_type),
             .init("open-config", actionOpenConfig, s_variant_type),
             .init("present-surface", actionPresentSurface, t_variant_type),
             .init("quit", actionQuit, null),
@@ -1973,6 +1976,149 @@ pub const Application = extern struct {
                 log.warn("new-tab: unable to create new window: {t}", .{err});
             };
         }
+    }
+
+    /// Shared implementation of the `app.new-split-right` and
+    /// `app.new-split-down` actions.
+    ///
+    /// These are the externally-reachable (D-Bus) counterparts of the
+    /// `split-tree.new-split` widget action used by the keybind path, with
+    /// one addition: they carry surface overrides (command, working
+    /// directory, title) using the same `(tas)` parameter shape as
+    /// `new-tab` — surface id (0 for focused) followed by arguments.
+    ///
+    /// The split is created relative to the active surface of the split
+    /// tree containing the target surface and takes focus, exactly like a
+    /// keybind-triggered split.
+    fn newSplitDirection(
+        self: *Self,
+        direction: Surface.Tree.Split.Direction,
+        parameter_: ?*glib.Variant,
+    ) void {
+        const core_app = self.core();
+
+        var arena: std.heap.ArenaAllocator = .init(core_app.alloc);
+        defer arena.deinit();
+
+        const alloc = arena.allocator();
+
+        const surface_id_, const overrides = result: {
+            const parameter = parameter_ orelse {
+                log.warn("new-split did not receive a parameter", .{});
+                return;
+            };
+
+            const tas_variant_type = glib.VariantType.new("(tas)");
+            defer tas_variant_type.free();
+
+            if (glib.Variant.isOfType(parameter, tas_variant_type) == 0) {
+                log.warn(
+                    "new-split parameter is of type '{s}', not '(tas)'",
+                    .{parameter.getTypeString()},
+                );
+                return;
+            }
+
+            var surface_id: u64 = 0;
+            var arguments_it_: ?*glib.VariantIter = null;
+            defer if (arguments_it_) |arguments_it| arguments_it.free();
+
+            parameter.get("(tas)", &surface_id, &arguments_it_);
+
+            const arguments_it = arguments_it_ orelse return;
+
+            const overrides = Overrides.parse(alloc, arguments_it) catch return;
+
+            break :result .{ if (surface_id == 0) null else surface_id, overrides };
+        };
+
+        const core_surface = surface: {
+            if (surface_id_) |surface_id| {
+                if (core_app.findSurfaceByID(surface_id)) |core_by_id| {
+                    break :surface core_by_id;
+                }
+                log.warn("new-split: unable to find surface 0x{x:0>16}", .{surface_id});
+            }
+
+            break :surface core_app.focusedSurface() orelse {
+                log.warn("new-split: unable to find surface", .{});
+                return;
+            };
+        };
+
+        const surface = core_surface.rt_surface.surface;
+        const tree = ext.getAncestor(
+            SplitTree,
+            surface.as(gtk.Widget),
+        ) orelse {
+            log.warn("new-split: surface is not in a split tree", .{});
+            return;
+        };
+
+        tree.newSplit(direction, tree.getActiveSurface(), overrides) catch |err| {
+            log.warn("new-split: unable to create split: {t}", .{err});
+        };
+    }
+
+    /// Handle `app.new-split-right` GTK action.
+    pub fn actionNewSplitRight(
+        _: *gio.SimpleAction,
+        parameter_: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        log.debug("received new split right action", .{});
+        self.newSplitDirection(.right, parameter_);
+    }
+
+    /// Handle `app.new-split-down` GTK action.
+    pub fn actionNewSplitDown(
+        _: *gio.SimpleAction,
+        parameter_: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        log.debug("received new split down action", .{});
+        self.newSplitDirection(.down, parameter_);
+    }
+
+    /// Handle `app.goto-split` GTK action.
+    ///
+    /// Parameter is a direction string ("left", "right", "up", "down",
+    /// "previous", "next") applied to the focused surface, matching the
+    /// goto_split keybind action values.
+    pub fn actionGotoSplit(
+        _: *gio.SimpleAction,
+        parameter_: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const parameter = parameter_ orelse {
+            log.warn("goto-split did not receive a parameter", .{});
+            return;
+        };
+
+        const s_variant_type = glib.VariantType.new("s");
+        defer s_variant_type.free();
+
+        if (glib.Variant.isOfType(parameter, s_variant_type) == 0) {
+            log.warn(
+                "goto-split parameter is of type '{s}', not 's'",
+                .{parameter.getTypeString()},
+            );
+            return;
+        }
+
+        var len: usize = undefined;
+        const buf = parameter.getString(&len);
+        const to = std.meta.stringToEnum(apprt.action.GotoSplit, buf[0..len]) orelse {
+            log.warn("goto-split: invalid direction '{s}'", .{buf[0..len]});
+            return;
+        };
+
+        const core_target = self.core().focusedSurface() orelse {
+            log.warn("goto-split: unable to find surface", .{});
+            return;
+        };
+
+        _ = Action.gotoSplit(.{ .surface = core_target }, to);
     }
 
     pub fn actionOpenConfig(
