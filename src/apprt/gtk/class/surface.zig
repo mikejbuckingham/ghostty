@@ -573,6 +573,28 @@ pub const Surface = extern struct {
         };
     };
 
+    /// The outcome of a surface drag-and-drop operation. This is tracked
+    /// because on Wayland the compositor can end a drag that no ghostty
+    /// drop target accepted as a successful drop (`drag-end` with no
+    /// preceding `drag-cancel`), so tear-off decisions can't rely on
+    /// cancel reasons alone.
+    const DragOutcome = enum {
+        /// Drag started, nothing has resolved it yet.
+        pending,
+
+        /// A ghostty split tree consumed the drop (surface moved into a
+        /// tree, possibly this one).
+        in_tree,
+
+        /// The drag ended without any ghostty target accepting it and a
+        /// tear-off was performed (or at least attempted).
+        torn_off,
+
+        /// The drag was cancelled by the user (e.g. Escape) without any
+        /// tear-off.
+        aborted,
+    };
+
     const Private = struct {
         /// The configuration that this surface is using.
         config: ?*Config = null,
@@ -716,6 +738,12 @@ pub const Surface = extern struct {
         progress_bar_overlay: *gtk.ProgressBar,
         error_page: *adw.StatusPage,
         terminal_page: *gtk.Overlay,
+
+        /// The outcome of a drag-and-drop operation started by this
+        /// surface's drag source. Written by the drag handlers and by any
+        /// ghostty split tree that consumes the drop; read at drag-end to
+        /// decide whether the drag turned into a tear-off.
+        drag_outcome: DragOutcome = .pending,
 
         /// The context for this surface (window, tab, or split)
         context: apprt.surface.NewSurfaceContext = .window,
@@ -3654,6 +3682,9 @@ pub const Surface = extern struct {
         _: *gdk.Drag,
         self: *Self,
     ) callconv(.c) void {
+        // Reset the outcome tracking for this drag.
+        self.private().drag_outcome = .pending;
+
         // The scale of the preview
         const preview_scale: f32 = 0.2;
 
@@ -3712,10 +3743,12 @@ pub const Surface = extern struct {
         // `.error` rather than `.no_target` (wl_data_source.cancelled
         // carries no reason), so both are treated as tear-off requests.
         if (reason != .no_target and reason != .@"error") {
-            log.warn("TEAROFF-DEBUG drag-cancel reason={}", .{reason});
+            log.warn("TEAROFF-DEBUG drag-cancel reason={} (aborting)", .{reason});
+            self.private().drag_outcome = .aborted;
             return @intFromBool(false);
         }
         log.warn("TEAROFF-DEBUG drag-cancel tearing off, reason={}", .{reason});
+        self.private().drag_outcome = .torn_off;
 
         self.tearOffToNewWindow() catch |err| {
             log.warn("surface tear-off failed err={}", .{err});
@@ -3780,7 +3813,29 @@ pub const Surface = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
-        log.warn("TEAROFF-DEBUG drag-end (drop accepted somewhere) surface={x}", .{self.core().?.id});
+        // drag-end fires for every completed drag, including successful
+        // drops that no ghostty target accepted: on Wayland the compositor
+        // can report a drop onto an arbitrary surface (another app, the
+        // desktop, another screen) as successful. Those drops are exactly
+        // the tear-off gesture, so an unconsumed successful drop tears the
+        // surface off into a new window.
+        switch (self.private().drag_outcome) {
+            // Drop was consumed by a ghostty split tree, already torn
+            // off by the cancel handler, or aborted by the user: nothing
+            // to do.
+            .in_tree, .torn_off, .aborted => {},
+
+            .pending => {
+                log.warn(
+                    "TEAROFF-DEBUG drag-end unconsumed surface={x}, tearing off",
+                    .{self.core().?.id},
+                );
+
+                self.tearOffToNewWindow() catch |err| {
+                    log.warn("surface tear-off failed err={}", .{err});
+                };
+            },
+        }
     }
 
     fn surfaceDrop(
@@ -3807,6 +3862,10 @@ pub const Surface = extern struct {
         // The only error that could happen here is an OOM,
         // and in that case we're already milliseconds away from crashing, so...
         st.moveSplit(from, self, dir) catch return 0;
+
+        // Mark the drag as consumed by a split tree so the drag source
+        // doesn't treat this drag as a tear-off at drag-end.
+        from.private().drag_outcome = .in_tree;
 
         // Clean up overlay state
         self.setDropOverlayDirection(null);
